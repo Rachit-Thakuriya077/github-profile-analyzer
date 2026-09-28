@@ -93,6 +93,10 @@ function App() {
   const [repos, setRepos] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [isRateLimited, setIsRateLimited] = useState(false);
+  const [token, setToken] = useState(() => localStorage.getItem('devscope-gh-token') || '');
+  const [showTokenModal, setShowTokenModal] = useState(false);
+  const [tokenInput, setTokenInput] = useState('');
   const [theme, setTheme] = useState(() => localStorage.getItem('devscope-theme') || 'dark');
   const [copied, setCopied] = useState(false);
 
@@ -111,8 +115,77 @@ function App() {
     setTheme(prev => prev === 'dark' ? 'light' : 'dark');
   };
 
+  const handleSaveToken = (newToken) => {
+    const trimmed = newToken.trim();
+    setToken(trimmed);
+    localStorage.setItem('devscope-gh-token', trimmed);
+    setShowTokenModal(false);
+    fetchGitHubData(currentUsername, trimmed);
+  };
+
+  // Demo Fallback Data in case GitHub rate limits the IP
+  const loadDemoData = () => {
+    setError(null);
+    setIsRateLimited(false);
+    setProfile({
+      login: 'Rachit-Thakuriya077',
+      name: 'Rachit Thakuriya',
+      avatar_url: 'https://avatars.githubusercontent.com/u/10000000?v=4',
+      bio: 'Full Stack Web Developer & Problem Solver | Coding Ninjas 10X SRM',
+      public_repos: 3,
+      followers: 12,
+      following: 8,
+      public_gists: 2,
+      company: 'SRM Institute of Science and Technology',
+      location: 'Chennai, India',
+      blog: 'https://rachit-thakuriya.dev',
+      twitter_username: '',
+      created_at: '2023-08-15T10:00:00Z',
+      hireable: true,
+      html_url: 'https://github.com/Rachit-Thakuriya077'
+    });
+    setRepos([
+      {
+        id: 1,
+        name: 'github-profile-analyzer',
+        html_url: 'https://github.com/Rachit-Thakuriya077/github-profile-analyzer',
+        description: 'Interactive React dashboard to analyze GitHub profiles, language distributions, and repository metrics.',
+        language: 'JavaScript',
+        stargazers_count: 5,
+        forks_count: 2,
+        updated_at: new Date().toISOString(),
+        visibility: 'public',
+        topics: ['react', 'github-api', 'dashboard', 'coding-ninjas']
+      },
+      {
+        id: 2,
+        name: 'web-game-portal',
+        html_url: 'https://github.com/Rachit-Thakuriya077/web-game-portal',
+        description: 'Multi-game arcade portal featuring browser games built with modern JavaScript and HTML5 Canvas.',
+        language: 'HTML',
+        stargazers_count: 3,
+        forks_count: 1,
+        updated_at: '2026-09-24T12:00:00Z',
+        visibility: 'public',
+        topics: ['game-dev', 'javascript', 'html5-canvas']
+      },
+      {
+        id: 3,
+        name: 'smart-expense-manager',
+        html_url: 'https://github.com/Rachit-Thakuriya077/smart-expense-manager',
+        description: 'Budgeting and expense splitter web application with dynamic balance calculations.',
+        language: 'TypeScript',
+        stargazers_count: 4,
+        forks_count: 0,
+        updated_at: '2026-09-10T14:30:00Z',
+        visibility: 'public',
+        topics: ['typescript', 'react', 'finance']
+      }
+    ]);
+  };
+
   // Fetch GitHub User & Repositories
-  const fetchGitHubData = async (rawInput) => {
+  const fetchGitHubData = async (rawInput, activeToken = token) => {
     const username = extractUsername(rawInput);
     if (!username) {
       setError('Please enter a valid GitHub username or profile URL.');
@@ -121,18 +194,25 @@ function App() {
 
     setLoading(true);
     setError(null);
+    setIsRateLimited(false);
     setRepoQuery('');
     setSelectedLanguage('all');
 
+    const headers = {};
+    if (activeToken) {
+      headers['Authorization'] = `Bearer ${activeToken}`;
+    }
+
     try {
       // 1. Fetch User Profile
-      const userRes = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}`);
+      const userRes = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}`, { headers });
       
       if (userRes.status === 404) {
         throw new Error(`User "${username}" was not found on GitHub. Please check the spelling.`);
       }
       if (userRes.status === 403) {
-        throw new Error("GitHub API rate limit exceeded (60 requests/hr for unauthenticated users). Please wait a few minutes or retry later.");
+        setIsRateLimited(true);
+        throw new Error("GitHub API rate limit exceeded (60 requests/hr for unauthenticated users). Please wait a few minutes, add a token, or load demo data below.");
       }
       if (!userRes.ok) {
         throw new Error(`Failed to load profile (Status: ${userRes.status}).`);
@@ -142,7 +222,7 @@ function App() {
       setProfile(userData);
 
       // 2. Fetch User Repositories (up to 100 recent)
-      const reposRes = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&sort=updated`);
+      const reposRes = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&sort=updated`, { headers });
       if (reposRes.ok) {
         const reposData = await reposRes.json();
         setRepos(Array.isArray(reposData) ? reposData : []);
@@ -259,6 +339,15 @@ function App() {
 
         <div className="header-actions">
           <button 
+            className="theme-toggle-btn"
+            onClick={() => { setTokenInput(token); setShowTokenModal(true); }}
+            title="Configure GitHub API Token to increase rate limit to 5,000 requests/hr"
+          >
+            <i className="fa-solid fa-key"></i>
+            <span>{token ? 'Token Active' : 'API Token'}</span>
+          </button>
+
+          <button 
             className="theme-toggle-btn" 
             onClick={toggleTheme}
             aria-label="Toggle theme"
@@ -269,6 +358,46 @@ function App() {
           </button>
         </div>
       </header>
+
+      {/* Token Modal */}
+      {showTokenModal && (
+        <div className="modal-backdrop" onClick={() => setShowTokenModal(false)}>
+          <div className="modal-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3><i className="fa-solid fa-key" style={{ marginRight: '0.5rem', color: '#6366f1' }}></i> GitHub API Rate Limit</h3>
+              <button className="clear-search-btn" onClick={() => setShowTokenModal(false)}>
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
+              GitHub limits unauthenticated IP requests to 60/hr. Adding a free GitHub Personal Access Token (with <strong>no permissions needed</strong>) increases your limit to <strong>5,000 requests/hour</strong>.
+            </p>
+            <input 
+              type="password"
+              className="repo-search-input"
+              style={{ width: '100%', marginBottom: '1rem', padding: '0.65rem 1rem' }}
+              placeholder="Paste GitHub Token (ghp_...)"
+              value={tokenInput}
+              onChange={e => setTokenInput(e.target.value)}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem' }}>
+              {token && (
+                <button 
+                  className="tag-btn" 
+                  style={{ color: '#ef4444' }}
+                  onClick={() => handleSaveToken('')}
+                >
+                  Clear Token
+                </button>
+              )}
+              <button className="tag-btn" onClick={() => setShowTokenModal(false)}>Cancel</button>
+              <button className="search-submit-btn" onClick={() => handleSaveToken(tokenInput)}>
+                Save Token
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Hero & Search Section */}
       <section className="hero-search-section">
@@ -340,9 +469,29 @@ function App() {
       {error && (
         <div className="error-banner">
           <i className="fa-solid fa-triangle-exclamation"></i>
-          <div className="error-content">
+          <div className="error-content" style={{ width: '100%' }}>
             <h3>Unable to fetch profile</h3>
             <p>{error}</p>
+            {isRateLimited && (
+              <div style={{ marginTop: '0.9rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+                <button 
+                  className="search-submit-btn" 
+                  style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}
+                  onClick={loadDemoData}
+                >
+                  <i className="fa-solid fa-bolt"></i>
+                  <span>Load Demo Profile</span>
+                </button>
+                <button 
+                  className="tag-btn"
+                  style={{ background: 'rgba(255,255,255,0.1)', borderColor: 'rgba(255,255,255,0.2)' }}
+                  onClick={() => { setTokenInput(token); setShowTokenModal(true); }}
+                >
+                  <i className="fa-solid fa-key" style={{ marginRight: '0.35rem' }}></i>
+                  <span>Add Free Token (5,000 req/hr)</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -444,7 +593,7 @@ function App() {
                     <a 
                       href={profile.blog.startsWith('http') ? profile.blog : `https://${profile.blog}`} 
                       target="_blank" 
-                      rel="noreferrer"
+                      rel="noreferrer" 
                     >
                       {profile.blog.replace(/^https?:\/\//, '')}
                     </a>
@@ -456,7 +605,7 @@ function App() {
                     <a 
                       href={`https://twitter.com/${profile.twitter_username}`} 
                       target="_blank" 
-                      rel="noreferrer"
+                      rel="noreferrer" 
                     >
                       @{profile.twitter_username}
                     </a>
