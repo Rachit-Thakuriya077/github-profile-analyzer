@@ -781,12 +781,7 @@ function App() {
         <div>
           DevScope &bull; Coding Ninjas 10X SRM Web Dev Task &bull; Second Year
         </div>
-        <div className="footer-tags">
-          <span className="footer-tag">React 18</span>
-          <span className="footer-tag">GitHub REST API</span>
-          <span className="footer-tag">Responsive UI</span>
-          <span className="footer-tag">Zero Config</span>
-        </div>
+        
       </footer>
     </div>
   );
