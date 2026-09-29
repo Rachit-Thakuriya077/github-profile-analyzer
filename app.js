@@ -49,10 +49,12 @@ const extractUsername = (input) => {
   if (!input) return '';
   let cleaned = input.trim();
   
+  // Remove leading @ if user typed @username
   if (cleaned.startsWith('@')) {
     cleaned = cleaned.substring(1);
   }
   
+  // If user pasted a full GitHub URL (e.g. https://github.com/username)
   try {
     if (cleaned.includes('github.com')) {
       if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
@@ -71,6 +73,7 @@ const extractUsername = (input) => {
     }
   }
   
+  // Strip any trailing slashes, queries, or hashes
   cleaned = cleaned.replace(/^\/+|\/+$/g, '').split('?')[0].split('#')[0].trim();
   return cleaned;
 };
@@ -235,7 +238,10 @@ function App() {
       setCurrentUsername(username);
       setSearchInput(username);
     } catch (err) {
-      setError(err.message || 'An unexpected error occurred while fetching profile.');
+      console.error(err);
+      setError(err.message || 'An unexpected error occurred while fetching GitHub data.');
+      setProfile(null);
+      setRepos([]);
     } finally {
       setLoading(false);
     }
@@ -246,6 +252,7 @@ function App() {
     fetchGitHubData(currentUsername);
   }, []);
 
+  // Handle Form Submit
   const handleSearchSubmit = (e) => {
     e.preventDefault();
     if (searchInput.trim()) {
@@ -253,76 +260,73 @@ function App() {
     }
   };
 
-  const handleQuickTagClick = (tagUser) => {
-    setSearchInput(tagUser);
-    fetchGitHubData(tagUser);
+  // Quick Preset Click
+  const handleQuickTagClick = (name) => {
+    setSearchInput(name);
+    fetchGitHubData(name);
   };
 
-  const handleCopyProfileUrl = () => {
-    if (profile && profile.html_url) {
+  // Copy Profile Link
+  const handleCopyLink = () => {
+    if (profile?.html_url) {
       navigator.clipboard.writeText(profile.html_url);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
   };
 
-  // Calculate Languages & Metrics
+  // Derive Unique Languages from Repos
+  const availableLanguages = useMemo(() => {
+    const langs = new Set();
+    repos.forEach(repo => {
+      if (repo.language) langs.add(repo.language);
+    });
+    return Array.from(langs).sort();
+  }, [repos]);
+
+  // Derive Language Statistics Breakdown
   const languageStats = useMemo(() => {
+    if (!repos.length) return [];
     const counts = {};
-    let totalKnownRepos = 0;
+    let totalWithLanguage = 0;
 
     repos.forEach(repo => {
       if (repo.language) {
         counts[repo.language] = (counts[repo.language] || 0) + 1;
-        totalKnownRepos += 1;
+        totalWithLanguage++;
       }
     });
 
-    if (totalKnownRepos === 0) return [];
+    if (totalWithLanguage === 0) return [];
 
     return Object.entries(counts)
-      .map(([name, count]) => ({
-        name,
+      .map(([lang, count]) => ({
+        name: lang,
         count,
-        percentage: ((count / totalKnownRepos) * 100).toFixed(1)
+        percentage: ((count / totalWithLanguage) * 100).toFixed(1),
+        color: getLanguageColor(lang)
       }))
-      .sort((a, b) => b.count - a.count);
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 7);
   }, [repos]);
 
-  // Aggregate Total Stars and Forks across repositories
-  const totalStars = useMemo(() => {
-    return repos.reduce((acc, repo) => acc + (repo.stargazers_count || 0), 0);
-  }, [repos]);
-
-  const totalForks = useMemo(() => {
-    return repos.reduce((acc, repo) => acc + (repo.forks_count || 0), 0);
-  }, [repos]);
-
-  // Filtered & Sorted Repositories
-  const filteredRepos = useMemo(() => {
+  // Filter & Sort Repositories
+  const filteredAndSortedRepos = useMemo(() => {
     return repos
       .filter(repo => {
         const matchesQuery = repo.name.toLowerCase().includes(repoQuery.toLowerCase()) ||
           (repo.description && repo.description.toLowerCase().includes(repoQuery.toLowerCase()));
-        const matchesLang = selectedLanguage === 'all' || repo.language === selectedLanguage;
-        return matchesQuery && matchesLang;
+        const matchesLanguage = selectedLanguage === 'all' || repo.language === selectedLanguage;
+        return matchesQuery && matchesLanguage;
       })
       .sort((a, b) => {
-        if (sortBy === 'stars') return (b.stargazers_count || 0) - (a.stargazers_count || 0);
-        if (sortBy === 'forks') return (b.forks_count || 0) - (a.forks_count || 0);
+        if (sortBy === 'stars') return b.stargazers_count - a.stargazers_count;
+        if (sortBy === 'forks') return b.forks_count - a.forks_count;
+        if (sortBy === 'updated') return new Date(b.updated_at) - new Date(a.updated_at);
         if (sortBy === 'name') return a.name.localeCompare(b.name);
-        return new Date(b.updated_at) - new Date(a.updated_at);
+        return 0;
       });
   }, [repos, repoQuery, selectedLanguage, sortBy]);
-
-  // Unique languages for dropdown filter
-  const availableLanguages = useMemo(() => {
-    const langs = new Set();
-    repos.forEach(r => {
-      if (r.language) langs.add(r.language);
-    });
-    return Array.from(langs).sort();
-  }, [repos]);
 
   return (
     <div className="app-wrapper">
@@ -417,11 +421,12 @@ function App() {
         </div>
       </section>
 
-      {/* Error / Rate Limit Alert */}
+      {/* Error State Banner */}
       {error && (
-        <div className="dashboard-container" style={{ paddingBottom: '1rem' }}>
-          <div className="error-banner">
-            <i className="fa-solid fa-triangle-exclamation"></i>
+        <div className="error-banner">
+          <i className="fa-solid fa-triangle-exclamation"></i>
+          <div className="error-content" style={{ width: '100%' }}>
+            <h3>Unable to fetch profile</h3>
             <p>{error}</p>
             {isRateLimited && (
               <div style={{ marginTop: '0.9rem' }}>
@@ -474,37 +479,40 @@ function App() {
                 src={profile.avatar_url} 
                 alt={`${profile.name || profile.login}'s avatar`} 
                 className="profile-avatar"
+                onError={(e) => {
+                  e.target.src = 'https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png';
+                }}
               />
               {profile.hireable && (
-                <span className="hireable-badge" title="Open to Work">
-                  <i className="fa-solid fa-briefcase"></i> Open to Work
-                </span>
+                <span className="hireable-badge">Available for hire</span>
               )}
             </div>
 
             <div className="profile-details">
-              <div className="profile-header-row">
-                <div>
-                  <h2 className="profile-name">{profile.name || profile.login}</h2>
-                  <span className="profile-login">@{profile.login}</span>
+              <div className="profile-heading">
+                <div className="profile-name-group">
+                  <h2>{profile.name || profile.login}</h2>
+                  <div className="profile-username">@{profile.login}</div>
                 </div>
-                <div className="profile-actions">
+
+                <div className="profile-cta-group">
                   <button 
-                    className="copy-btn" 
-                    onClick={handleCopyProfileUrl}
-                    title="Copy Profile URL"
+                    className="btn-copy" 
+                    onClick={handleCopyLink} 
+                    title="Copy GitHub link to clipboard"
                   >
-                    <i className={copied ? "fa-solid fa-check" : "fa-regular fa-copy"}></i>
+                    <i className={copied ? 'fa-solid fa-check' : 'fa-regular fa-copy'}></i>
                     <span>{copied ? 'Copied!' : 'Share'}</span>
                   </button>
+
                   <a 
                     href={profile.html_url} 
                     target="_blank" 
                     rel="noreferrer" 
-                    className="view-github-btn"
+                    className="btn-github"
                   >
-                    <span>View on GitHub</span>
-                    <i className="fa-solid fa-arrow-up-right-from-square"></i>
+                    <i className="fa-brands fa-github"></i>
+                    <span>View GitHub</span>
                   </a>
                 </div>
               </div>
@@ -513,7 +521,7 @@ function App() {
                 <p className="profile-bio">{profile.bio}</p>
               )}
 
-              {/* Profile Metadata */}
+              {/* Profile Meta Info */}
               <div className="profile-meta-grid">
                 {profile.company && (
                   <div className="meta-item">
@@ -559,7 +567,7 @@ function App() {
             </div>
           </div>
 
-          {/* Quick Stats Grid */}
+          {/* Stats Grid */}
           <div className="stats-grid">
             <div className="stat-card">
               <div className="stat-icon repos">
@@ -592,103 +600,79 @@ function App() {
             </div>
 
             <div className="stat-card">
-              <div className="stat-icon stars">
-                <i className="fa-solid fa-star"></i>
+              <div className="stat-icon gists">
+                <i className="fa-solid fa-code"></i>
               </div>
               <div className="stat-info">
-                <span className="stat-value">{formatNumber(totalStars)}</span>
-                <span className="stat-label">Total Stars</span>
+                <span className="stat-value">{formatNumber(profile.public_gists)}</span>
+                <span className="stat-label">Public Gists</span>
               </div>
             </div>
           </div>
 
-          {/* Language Breakdown Section */}
-          <section className="section-card language-section">
-            <div className="section-header">
-              <h3 className="section-title">
-                <i className="fa-solid fa-chart-pie"></i>
-                <span>Language & Technology Breakdown</span>
-              </h3>
-              <span className="stats-badge">{languageStats.length} Languages Detected</span>
-            </div>
-
-            {languageStats.length === 0 ? (
-              <p className="empty-subtext">No public repository language data detected.</p>
-            ) : (
-              <>
-                {/* Multi-segmented Progress Bar */}
-                <div className="lang-bar-container">
-                  {languageStats.map(item => (
-                    <div 
-                      key={item.name}
-                      className="lang-bar-segment"
-                      style={{
-                        width: `${item.percentage}%`,
-                        backgroundColor: getLanguageColor(item.name)
-                      }}
-                      title={`${item.name}: ${item.percentage}% (${item.count} repos)`}
-                    />
-                  ))}
-                </div>
-
-                {/* Language Legend Pills */}
-                <div className="lang-legend-grid">
-                  {languageStats.map(item => (
-                    <div key={item.name} className="lang-legend-item">
-                      <span 
-                        className="lang-indicator-dot"
-                        style={{ backgroundColor: getLanguageColor(item.name) }}
-                      />
-                      <span className="lang-name">{item.name}</span>
-                      <span className="lang-percent">{item.percentage}%</span>
-                      <span className="lang-count">({item.count} {item.count === 1 ? 'repo' : 'repos'})</span>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </section>
-
-          {/* Repositories Section */}
-          <section className="section-card">
-            <div className="repos-header">
-              <div className="repos-title-group">
+          {/* Languages Breakdown */}
+          {languageStats.length > 0 && (
+            <div className="languages-card">
+              <div className="languages-header">
                 <h3 className="section-title">
-                  <i className="fa-solid fa-folder-tree"></i>
-                  <span>Public Repositories</span>
+                  <i className="fa-solid fa-code-branch"></i>
+                  <span>Top Languages Distribution</span>
                 </h3>
                 <span className="repos-count-badge">
-                  Showing {filteredRepos.length} of {repos.length}
+                  {languageStats.length} {languageStats.length === 1 ? 'Language' : 'Languages'} Analyzed
                 </span>
               </div>
 
-              {/* Repos Controls: Search, Language Filter, Sort */}
-              <div className="repos-controls">
-                <div className="repo-search-wrapper">
+              {/* Progress Multi-Bar */}
+              <div className="lang-progress-bar" title="Language distribution across public repositories">
+                {languageStats.map(stat => (
+                  <div 
+                    key={stat.name}
+                    className="lang-progress-segment"
+                    style={{
+                      width: `${stat.percentage}%`,
+                      backgroundColor: stat.color
+                    }}
+                    title={`${stat.name}: ${stat.percentage}% (${stat.count} repos)`}
+                  />
+                ))}
+              </div>
+
+              {/* Chips */}
+              <div className="lang-chips-container">
+                {languageStats.map(stat => (
+                  <div key={stat.name} className="lang-chip">
+                    <span className="lang-dot" style={{ backgroundColor: stat.color }}></span>
+                    <span className="lang-name">{stat.name}</span>
+                    <span className="lang-percentage">{stat.percentage}%</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Repositories Section */}
+          <section className="repos-section">
+            {/* Filter and Search Bar */}
+            <div className="repos-controls-bar">
+              <div className="repos-filters-group">
+                <div className="repo-search-input-wrapper">
                   <i className="fa-solid fa-magnifying-glass"></i>
                   <input 
                     type="text" 
-                    placeholder="Filter repositories..." 
-                    className="repo-search-input"
+                    className="repo-search-input" 
+                    placeholder="Search repositories..."
                     value={repoQuery}
                     onChange={(e) => setRepoQuery(e.target.value)}
+                    aria-label="Filter repositories by title or description"
                   />
-                  {repoQuery && (
-                    <button 
-                      className="clear-search-btn" 
-                      onClick={() => setRepoQuery('')}
-                      style={{ right: 8, top: '50%', transform: 'translateY(-50%)' }}
-                    >
-                      <i className="fa-solid fa-xmark"></i>
-                    </button>
-                  )}
                 </div>
 
                 <select 
-                  className="control-select"
+                  className="filter-select"
                   value={selectedLanguage}
                   onChange={(e) => setSelectedLanguage(e.target.value)}
-                  aria-label="Filter by language"
+                  aria-label="Filter by programming language"
                 >
                   <option value="all">All Languages</option>
                   {availableLanguages.map(lang => (
@@ -697,101 +681,95 @@ function App() {
                 </select>
 
                 <select 
-                  className="control-select"
+                  className="filter-select"
                   value={sortBy}
                   onChange={(e) => setSortBy(e.target.value)}
                   aria-label="Sort repositories"
                 >
-                  <option value="stars">Most Stars</option>
-                  <option value="forks">Most Forks</option>
+                  <option value="stars">Sort by Stars (High to Low)</option>
+                  <option value="forks">Sort by Forks (High to Low)</option>
                   <option value="updated">Recently Updated</option>
                   <option value="name">Name (A-Z)</option>
                 </select>
               </div>
+
+              <div className="repos-count-badge">
+                Showing {filteredAndSortedRepos.length} of {repos.length} repos
+              </div>
             </div>
 
-            {/* Repositories List Grid */}
-            {filteredRepos.length === 0 ? (
-              <div className="empty-repos-state">
-                <i className="fa-solid fa-box-open"></i>
-                <p>No repositories match your selected filters.</p>
-                {(repoQuery || selectedLanguage !== 'all') && (
-                  <button 
-                    className="reset-filters-btn"
-                    onClick={() => {
-                      setRepoQuery('');
-                      setSelectedLanguage('all');
-                    }}
-                  >
-                    Reset Filters
-                  </button>
-                )}
-              </div>
-            ) : (
+            {/* Repos Grid */}
+            {filteredAndSortedRepos.length > 0 ? (
               <div className="repos-grid">
-                {filteredRepos.map(repo => (
-                  <div key={repo.id} className="repo-card">
-                    <div className="repo-card-top">
-                      <div className="repo-card-name-row">
-                        <i className="fa-regular fa-folder-closed repo-icon"></i>
+                {filteredAndSortedRepos.map(repo => (
+                  <article key={repo.id} className="repo-card">
+                    <div>
+                      <div className="repo-header">
                         <a 
                           href={repo.html_url} 
                           target="_blank" 
                           rel="noreferrer" 
-                          className="repo-title-link"
+                          className="repo-name-link"
                         >
-                          {repo.name}
+                          <i className="fa-regular fa-folder-closed"></i>
+                          <span>{repo.name}</span>
                         </a>
+                        <span className="repo-badge-visibility">
+                          {repo.visibility || (repo.private ? 'Private' : 'Public')}
+                        </span>
                       </div>
-                      <span className="repo-visibility-pill">{repo.visibility || 'public'}</span>
+
+                      <p className="repo-description">
+                        {repo.description || 'No description provided.'}
+                      </p>
+
+                      {repo.topics && repo.topics.length > 0 && (
+                        <div className="repo-topics">
+                          {repo.topics.slice(0, 3).map(topic => (
+                            <span key={topic} className="topic-tag">#{topic}</span>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
-                    <p className="repo-desc">
-                      {repo.description || 'No description provided for this repository.'}
-                    </p>
-
-                    {/* Topics */}
-                    {repo.topics && repo.topics.length > 0 && (
-                      <div className="repo-topics-list">
-                        {repo.topics.slice(0, 4).map(topic => (
-                          <span key={topic} className="topic-tag">{topic}</span>
-                        ))}
-                        {repo.topics.length > 4 && (
-                          <span className="topic-tag more">+{repo.topics.length - 4}</span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* Card Footer */}
-                    <div className="repo-card-footer">
-                      <div className="repo-footer-left">
-                        {repo.language && (
-                          <span className="repo-lang">
+                    <div className="repo-footer">
+                      <div className="repo-lang-meta">
+                        {repo.language ? (
+                          <>
                             <span 
-                              className="lang-indicator-dot"
+                              className="lang-dot" 
                               style={{ backgroundColor: getLanguageColor(repo.language) }}
-                            />
-                            {repo.language}
-                          </span>
+                            ></span>
+                            <span>{repo.language}</span>
+                          </>
+                        ) : (
+                          <span>Plain text</span>
                         )}
-
-                        <span className="repo-metric" title="Stars">
-                          <i className="fa-regular fa-star"></i>
-                          {formatNumber(repo.stargazers_count)}
-                        </span>
-
-                        <span className="repo-metric" title="Forks">
-                          <i className="fa-solid fa-code-fork"></i>
-                          {formatNumber(repo.forks_count)}
-                        </span>
                       </div>
 
-                      <span className="repo-updated">
-                        Updated {formatDate(repo.updated_at)}
-                      </span>
+                      <div className="repo-stats-meta">
+                        <span className="repo-stat-item" title="Stars">
+                          <i className="fa-regular fa-star"></i>
+                          <span>{formatNumber(repo.stargazers_count)}</span>
+                        </span>
+                        <span className="repo-stat-item" title="Forks">
+                          <i className="fa-solid fa-code-fork"></i>
+                          <span>{formatNumber(repo.forks_count)}</span>
+                        </span>
+                        <span className="repo-stat-item" title="Updated Date">
+                          <i className="fa-regular fa-clock"></i>
+                          <span>{formatDate(repo.updated_at)}</span>
+                        </span>
+                      </div>
                     </div>
-                  </div>
+                  </article>
                 ))}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <i className="fa-solid fa-code-commit"></i>
+                <h3>No repositories match your criteria</h3>
+                <p>Try clearing your search query or selecting "All Languages".</p>
               </div>
             )}
           </section>
@@ -799,18 +777,23 @@ function App() {
       )}
 
       {/* Footer */}
-      <footer className="footer-nav">
-        <p>
-          DevScope — Built for <strong>Coding Ninjas 10X SRM Club Recruitment</strong>
-        </p>
-        <p className="footer-subtext">
-          Powered by GitHub REST API v3 • React 18
-        </p>
+      <footer className="app-footer">
+        <div>
+          DevScope &bull; Coding Ninjas 10X SRM Web Dev Task &bull; Second Year
+        </div>
+        <div className="footer-tags">
+          <span className="footer-tag">React 18</span>
+          <span className="footer-tag">GitHub REST API</span>
+          <span className="footer-tag">Responsive UI</span>
+          <span className="footer-tag">Zero Config</span>
+        </div>
       </footer>
     </div>
   );
 }
 
-const root = ReactDOM.createRoot(document.getElementById('root'));
+// Mount the React Application
+const rootElement = document.getElementById('root');
+const root = ReactDOM.createRoot(rootElement);
 root.render(<App />);
 
