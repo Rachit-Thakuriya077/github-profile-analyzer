@@ -1,6 +1,6 @@
 # 🚀 DevScope — GitHub Profile & Repository Analyzer
-
-> Built for the **Coding Ninjas 10X SRM Web Dev Recruitment Tasks (Second Year - Task 1)**.
+**Live demo:** _https://github-profile-analyzer-ecru.vercel.app/_
+> Built for the **Coding Ninjas 10X SRM Web Dev Recruitment Tasks **.
 
 DevScope is a sleek, modern, interactive developer dashboard built with **React 18** and **GitHub REST API**. It allows recruiters and developers to search for any GitHub username to instantly visualize profile details, repository metrics, star counts, programming language distribution, and direct links.
 
