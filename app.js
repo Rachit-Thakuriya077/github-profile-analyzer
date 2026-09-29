@@ -49,12 +49,10 @@ const extractUsername = (input) => {
   if (!input) return '';
   let cleaned = input.trim();
   
-  // Remove leading @ if user typed @username
   if (cleaned.startsWith('@')) {
     cleaned = cleaned.substring(1);
   }
   
-  // If user pasted a full GitHub URL (e.g. https://github.com/username)
   try {
     if (cleaned.includes('github.com')) {
       if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
@@ -73,7 +71,6 @@ const extractUsername = (input) => {
     }
   }
   
-  // Strip any trailing slashes, queries, or hashes
   cleaned = cleaned.replace(/^\/+|\/+$/g, '').split('?')[0].split('#')[0].trim();
   return cleaned;
 };
@@ -94,9 +91,6 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [isRateLimited, setIsRateLimited] = useState(false);
-  const [token, setToken] = useState(() => localStorage.getItem('devscope-gh-token') || '');
-  const [showTokenModal, setShowTokenModal] = useState(false);
-  const [tokenInput, setTokenInput] = useState('');
   const [theme, setTheme] = useState(() => localStorage.getItem('devscope-theme') || 'dark');
   const [copied, setCopied] = useState(false);
 
@@ -115,15 +109,7 @@ function App() {
     setTheme(prev => prev === 'dark' ? 'light' : 'dark');
   };
 
-  const handleSaveToken = (newToken) => {
-    const trimmed = newToken.trim();
-    setToken(trimmed);
-    localStorage.setItem('devscope-gh-token', trimmed);
-    setShowTokenModal(false);
-    fetchGitHubData(currentUsername, trimmed);
-  };
-
-  // Demo Fallback Data in case GitHub rate limits the IP
+  // Demo Fallback Data in case rate limit is hit
   const loadDemoData = () => {
     setError(null);
     setIsRateLimited(false);
@@ -185,7 +171,7 @@ function App() {
   };
 
   // Fetch GitHub User & Repositories
-  const fetchGitHubData = async (rawInput, activeToken = token) => {
+  const fetchGitHubData = async (rawInput) => {
     const username = extractUsername(rawInput);
     if (!username) {
       setError('Please enter a valid GitHub username or profile URL.');
@@ -198,21 +184,26 @@ function App() {
     setRepoQuery('');
     setSelectedLanguage('all');
 
-    const headers = {};
-    if (activeToken) {
-      headers['Authorization'] = `Bearer ${activeToken}`;
-    }
-
     try {
-      // 1. Fetch User Profile
-      const userRes = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}`, { headers });
+      // 1. Fetch User Profile (Tries secure backend proxy first, falls back to direct API)
+      let userRes = null;
+      try {
+        const proxyRes = await fetch(`/api/github?username=${encodeURIComponent(username)}`);
+        if (proxyRes.ok) userRes = proxyRes;
+      } catch (e) {
+        // Local dev without serverless runtime
+      }
+
+      if (!userRes) {
+        userRes = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}`);
+      }
       
       if (userRes.status === 404) {
         throw new Error(`User "${username}" was not found on GitHub. Please check the spelling.`);
       }
       if (userRes.status === 403) {
         setIsRateLimited(true);
-        throw new Error("GitHub API rate limit exceeded (60 requests/hr for unauthenticated users). Please wait a few minutes, add a token, or load demo data below.");
+        throw new Error("GitHub API rate limit reached. Please wait a moment or load the demo profile below.");
       }
       if (!userRes.ok) {
         throw new Error(`Failed to load profile (Status: ${userRes.status}).`);
@@ -221,8 +212,19 @@ function App() {
       const userData = await userRes.json();
       setProfile(userData);
 
-      // 2. Fetch User Repositories (up to 100 recent)
-      const reposRes = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&sort=updated`, { headers });
+      // 2. Fetch User Repositories
+      let reposRes = null;
+      try {
+        const proxyRepos = await fetch(`/api/github?username=${encodeURIComponent(username)}&endpoint=repos`);
+        if (proxyRepos.ok) reposRes = proxyRepos;
+      } catch (e) {
+        // Fallback
+      }
+
+      if (!reposRes) {
+        reposRes = await fetch(`https://api.github.com/users/${encodeURIComponent(username)}/repos?per_page=100&sort=updated`);
+      }
+
       if (reposRes.ok) {
         const reposData = await reposRes.json();
         setRepos(Array.isArray(reposData) ? reposData : []);
@@ -233,10 +235,7 @@ function App() {
       setCurrentUsername(username);
       setSearchInput(username);
     } catch (err) {
-      console.error(err);
-      setError(err.message || 'An unexpected error occurred while fetching GitHub data.');
-      setProfile(null);
-      setRepos([]);
+      setError(err.message || 'An unexpected error occurred while fetching profile.');
     } finally {
       setLoading(false);
     }
@@ -247,7 +246,6 @@ function App() {
     fetchGitHubData(currentUsername);
   }, []);
 
-  // Handle Form Submit
   const handleSearchSubmit = (e) => {
     e.preventDefault();
     if (searchInput.trim()) {
@@ -255,73 +253,76 @@ function App() {
     }
   };
 
-  // Quick Preset Click
-  const handleQuickTagClick = (name) => {
-    setSearchInput(name);
-    fetchGitHubData(name);
+  const handleQuickTagClick = (tagUser) => {
+    setSearchInput(tagUser);
+    fetchGitHubData(tagUser);
   };
 
-  // Copy Profile Link
-  const handleCopyLink = () => {
-    if (profile?.html_url) {
+  const handleCopyProfileUrl = () => {
+    if (profile && profile.html_url) {
       navigator.clipboard.writeText(profile.html_url);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
   };
 
-  // Derive Unique Languages from Repos
-  const availableLanguages = useMemo(() => {
-    const langs = new Set();
-    repos.forEach(repo => {
-      if (repo.language) langs.add(repo.language);
-    });
-    return Array.from(langs).sort();
-  }, [repos]);
-
-  // Derive Language Statistics Breakdown
+  // Calculate Languages & Metrics
   const languageStats = useMemo(() => {
-    if (!repos.length) return [];
     const counts = {};
-    let totalWithLanguage = 0;
+    let totalKnownRepos = 0;
 
     repos.forEach(repo => {
       if (repo.language) {
         counts[repo.language] = (counts[repo.language] || 0) + 1;
-        totalWithLanguage++;
+        totalKnownRepos += 1;
       }
     });
 
-    if (totalWithLanguage === 0) return [];
+    if (totalKnownRepos === 0) return [];
 
     return Object.entries(counts)
-      .map(([lang, count]) => ({
-        name: lang,
+      .map(([name, count]) => ({
+        name,
         count,
-        percentage: ((count / totalWithLanguage) * 100).toFixed(1),
-        color: getLanguageColor(lang)
+        percentage: ((count / totalKnownRepos) * 100).toFixed(1)
       }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 7); // Top 7 languages
+      .sort((a, b) => b.count - a.count);
   }, [repos]);
 
-  // Filter & Sort Repositories
-  const filteredAndSortedRepos = useMemo(() => {
+  // Aggregate Total Stars and Forks across repositories
+  const totalStars = useMemo(() => {
+    return repos.reduce((acc, repo) => acc + (repo.stargazers_count || 0), 0);
+  }, [repos]);
+
+  const totalForks = useMemo(() => {
+    return repos.reduce((acc, repo) => acc + (repo.forks_count || 0), 0);
+  }, [repos]);
+
+  // Filtered & Sorted Repositories
+  const filteredRepos = useMemo(() => {
     return repos
       .filter(repo => {
         const matchesQuery = repo.name.toLowerCase().includes(repoQuery.toLowerCase()) ||
           (repo.description && repo.description.toLowerCase().includes(repoQuery.toLowerCase()));
-        const matchesLanguage = selectedLanguage === 'all' || repo.language === selectedLanguage;
-        return matchesQuery && matchesLanguage;
+        const matchesLang = selectedLanguage === 'all' || repo.language === selectedLanguage;
+        return matchesQuery && matchesLang;
       })
       .sort((a, b) => {
-        if (sortBy === 'stars') return b.stargazers_count - a.stargazers_count;
-        if (sortBy === 'forks') return b.forks_count - a.forks_count;
-        if (sortBy === 'updated') return new Date(b.updated_at) - new Date(a.updated_at);
+        if (sortBy === 'stars') return (b.stargazers_count || 0) - (a.stargazers_count || 0);
+        if (sortBy === 'forks') return (b.forks_count || 0) - (a.forks_count || 0);
         if (sortBy === 'name') return a.name.localeCompare(b.name);
-        return 0;
+        return new Date(b.updated_at) - new Date(a.updated_at);
       });
   }, [repos, repoQuery, selectedLanguage, sortBy]);
+
+  // Unique languages for dropdown filter
+  const availableLanguages = useMemo(() => {
+    const langs = new Set();
+    repos.forEach(r => {
+      if (r.language) langs.add(r.language);
+    });
+    return Array.from(langs).sort();
+  }, [repos]);
 
   return (
     <div className="app-wrapper">
@@ -339,15 +340,6 @@ function App() {
 
         <div className="header-actions">
           <button 
-            className="theme-toggle-btn"
-            onClick={() => { setTokenInput(token); setShowTokenModal(true); }}
-            title="Configure GitHub API Token to increase rate limit to 5,000 requests/hr"
-          >
-            <i className="fa-solid fa-key"></i>
-            <span>{token ? 'Token Active' : 'API Token'}</span>
-          </button>
-
-          <button 
             className="theme-toggle-btn" 
             onClick={toggleTheme}
             aria-label="Toggle theme"
@@ -358,46 +350,6 @@ function App() {
           </button>
         </div>
       </header>
-
-      {/* Token Modal */}
-      {showTokenModal && (
-        <div className="modal-backdrop" onClick={() => setShowTokenModal(false)}>
-          <div className="modal-card" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3><i className="fa-solid fa-key" style={{ marginRight: '0.5rem', color: '#6366f1' }}></i> GitHub API Rate Limit</h3>
-              <button className="clear-search-btn" onClick={() => setShowTokenModal(false)}>
-                <i className="fa-solid fa-xmark"></i>
-              </button>
-            </div>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '1rem' }}>
-              GitHub limits unauthenticated IP requests to 60/hr. Adding a free GitHub Personal Access Token (with <strong>no permissions needed</strong>) increases your limit to <strong>5,000 requests/hour</strong>.
-            </p>
-            <input 
-              type="password"
-              className="repo-search-input"
-              style={{ width: '100%', marginBottom: '1rem', padding: '0.65rem 1rem' }}
-              placeholder="Paste GitHub Token (ghp_...)"
-              value={tokenInput}
-              onChange={e => setTokenInput(e.target.value)}
-            />
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.6rem' }}>
-              {token && (
-                <button 
-                  className="tag-btn" 
-                  style={{ color: '#ef4444' }}
-                  onClick={() => handleSaveToken('')}
-                >
-                  Clear Token
-                </button>
-              )}
-              <button className="tag-btn" onClick={() => setShowTokenModal(false)}>Cancel</button>
-              <button className="search-submit-btn" onClick={() => handleSaveToken(tokenInput)}>
-                Save Token
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Hero & Search Section */}
       <section className="hero-search-section">
@@ -465,15 +417,14 @@ function App() {
         </div>
       </section>
 
-      {/* Error State Banner */}
+      {/* Error / Rate Limit Alert */}
       {error && (
-        <div className="error-banner">
-          <i className="fa-solid fa-triangle-exclamation"></i>
-          <div className="error-content" style={{ width: '100%' }}>
-            <h3>Unable to fetch profile</h3>
+        <div className="dashboard-container" style={{ paddingBottom: '1rem' }}>
+          <div className="error-banner">
+            <i className="fa-solid fa-triangle-exclamation"></i>
             <p>{error}</p>
             {isRateLimited && (
-              <div style={{ marginTop: '0.9rem', display: 'flex', gap: '0.75rem', flexWrap: 'wrap' }}>
+              <div style={{ marginTop: '0.9rem' }}>
                 <button 
                   className="search-submit-btn" 
                   style={{ padding: '0.45rem 1rem', fontSize: '0.85rem' }}
@@ -481,14 +432,6 @@ function App() {
                 >
                   <i className="fa-solid fa-bolt"></i>
                   <span>Load Demo Profile</span>
-                </button>
-                <button 
-                  className="tag-btn"
-                  style={{ background: 'rgba(255,255,255,0.1)', borderColor: 'rgba(255,255,255,0.2)' }}
-                  onClick={() => { setTokenInput(token); setShowTokenModal(true); }}
-                >
-                  <i className="fa-solid fa-key" style={{ marginRight: '0.35rem' }}></i>
-                  <span>Add Free Token (5,000 req/hr)</span>
                 </button>
               </div>
             )}
@@ -531,40 +474,37 @@ function App() {
                 src={profile.avatar_url} 
                 alt={`${profile.name || profile.login}'s avatar`} 
                 className="profile-avatar"
-                onError={(e) => {
-                  e.target.src = 'https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png';
-                }}
               />
               {profile.hireable && (
-                <span className="hireable-badge">Available for hire</span>
+                <span className="hireable-badge" title="Open to Work">
+                  <i className="fa-solid fa-briefcase"></i> Open to Work
+                </span>
               )}
             </div>
 
             <div className="profile-details">
-              <div className="profile-heading">
-                <div className="profile-name-group">
-                  <h2>{profile.name || profile.login}</h2>
-                  <div className="profile-username">@{profile.login}</div>
+              <div className="profile-header-row">
+                <div>
+                  <h2 className="profile-name">{profile.name || profile.login}</h2>
+                  <span className="profile-login">@{profile.login}</span>
                 </div>
-
-                <div className="profile-cta-group">
+                <div className="profile-actions">
                   <button 
-                    className="btn-copy" 
-                    onClick={handleCopyLink} 
-                    title="Copy GitHub link to clipboard"
+                    className="copy-btn" 
+                    onClick={handleCopyProfileUrl}
+                    title="Copy Profile URL"
                   >
-                    <i className={copied ? 'fa-solid fa-check' : 'fa-regular fa-copy'}></i>
+                    <i className={copied ? "fa-solid fa-check" : "fa-regular fa-copy"}></i>
                     <span>{copied ? 'Copied!' : 'Share'}</span>
                   </button>
-
                   <a 
                     href={profile.html_url} 
                     target="_blank" 
                     rel="noreferrer" 
-                    className="btn-github"
+                    className="view-github-btn"
                   >
-                    <i className="fa-brands fa-github"></i>
-                    <span>View GitHub</span>
+                    <span>View on GitHub</span>
+                    <i className="fa-solid fa-arrow-up-right-from-square"></i>
                   </a>
                 </div>
               </div>
@@ -652,79 +592,103 @@ function App() {
             </div>
 
             <div className="stat-card">
-              <div className="stat-icon gists">
-                <i className="fa-solid fa-code"></i>
+              <div className="stat-icon stars">
+                <i className="fa-solid fa-star"></i>
               </div>
               <div className="stat-info">
-                <span className="stat-value">{formatNumber(profile.public_gists)}</span>
-                <span className="stat-label">Public Gists</span>
+                <span className="stat-value">{formatNumber(totalStars)}</span>
+                <span className="stat-label">Total Stars</span>
               </div>
             </div>
           </div>
 
-          {/* Languages Breakdown */}
-          {languageStats.length > 0 && (
-            <div className="languages-card">
-              <div className="languages-header">
+          {/* Language Breakdown Section */}
+          <section className="section-card language-section">
+            <div className="section-header">
+              <h3 className="section-title">
+                <i className="fa-solid fa-chart-pie"></i>
+                <span>Language & Technology Breakdown</span>
+              </h3>
+              <span className="stats-badge">{languageStats.length} Languages Detected</span>
+            </div>
+
+            {languageStats.length === 0 ? (
+              <p className="empty-subtext">No public repository language data detected.</p>
+            ) : (
+              <>
+                {/* Multi-segmented Progress Bar */}
+                <div className="lang-bar-container">
+                  {languageStats.map(item => (
+                    <div 
+                      key={item.name}
+                      className="lang-bar-segment"
+                      style={{
+                        width: `${item.percentage}%`,
+                        backgroundColor: getLanguageColor(item.name)
+                      }}
+                      title={`${item.name}: ${item.percentage}% (${item.count} repos)`}
+                    />
+                  ))}
+                </div>
+
+                {/* Language Legend Pills */}
+                <div className="lang-legend-grid">
+                  {languageStats.map(item => (
+                    <div key={item.name} className="lang-legend-item">
+                      <span 
+                        className="lang-indicator-dot"
+                        style={{ backgroundColor: getLanguageColor(item.name) }}
+                      />
+                      <span className="lang-name">{item.name}</span>
+                      <span className="lang-percent">{item.percentage}%</span>
+                      <span className="lang-count">({item.count} {item.count === 1 ? 'repo' : 'repos'})</span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </section>
+
+          {/* Repositories Section */}
+          <section className="section-card">
+            <div className="repos-header">
+              <div className="repos-title-group">
                 <h3 className="section-title">
-                  <i className="fa-solid fa-code-branch"></i>
-                  <span>Top Languages Distribution</span>
+                  <i className="fa-solid fa-folder-tree"></i>
+                  <span>Public Repositories</span>
                 </h3>
                 <span className="repos-count-badge">
-                  {languageStats.length} {languageStats.length === 1 ? 'Language' : 'Languages'} Analyzed
+                  Showing {filteredRepos.length} of {repos.length}
                 </span>
               </div>
 
-              {/* Progress Multi-Bar */}
-              <div className="lang-progress-bar" title="Language distribution across public repositories">
-                {languageStats.map(stat => (
-                  <div 
-                    key={stat.name}
-                    className="lang-progress-segment"
-                    style={{
-                      width: `${stat.percentage}%`,
-                      backgroundColor: stat.color
-                    }}
-                    title={`${stat.name}: ${stat.percentage}% (${stat.count} repos)`}
-                  />
-                ))}
-              </div>
-
-              {/* Chips */}
-              <div className="lang-chips-container">
-                {languageStats.map(stat => (
-                  <div key={stat.name} className="lang-chip">
-                    <span className="lang-dot" style={{ backgroundColor: stat.color }}></span>
-                    <span className="lang-name">{stat.name}</span>
-                    <span className="lang-percentage">{stat.percentage}%</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Repositories Section */}
-          <section className="repos-section">
-            {/* Filter and Search Bar */}
-            <div className="repos-controls-bar">
-              <div className="repos-filters-group">
-                <div className="repo-search-input-wrapper">
+              {/* Repos Controls: Search, Language Filter, Sort */}
+              <div className="repos-controls">
+                <div className="repo-search-wrapper">
                   <i className="fa-solid fa-magnifying-glass"></i>
                   <input 
                     type="text" 
-                    className="repo-search-input" 
-                    placeholder="Search repositories..."
+                    placeholder="Filter repositories..." 
+                    className="repo-search-input"
                     value={repoQuery}
                     onChange={(e) => setRepoQuery(e.target.value)}
-                    aria-label="Filter repositories by title or description"
                   />
+                  {repoQuery && (
+                    <button 
+                      className="clear-search-btn" 
+                      onClick={() => setRepoQuery('')}
+                      style={{ right: 8, top: '50%', transform: 'translateY(-50%)' }}
+                    >
+                      <i className="fa-solid fa-xmark"></i>
+                    </button>
+                  )}
                 </div>
 
                 <select 
-                  className="filter-select"
+                  className="control-select"
                   value={selectedLanguage}
                   onChange={(e) => setSelectedLanguage(e.target.value)}
-                  aria-label="Filter by programming language"
+                  aria-label="Filter by language"
                 >
                   <option value="all">All Languages</option>
                   {availableLanguages.map(lang => (
@@ -733,95 +697,101 @@ function App() {
                 </select>
 
                 <select 
-                  className="filter-select"
+                  className="control-select"
                   value={sortBy}
                   onChange={(e) => setSortBy(e.target.value)}
                   aria-label="Sort repositories"
                 >
-                  <option value="stars">Sort by Stars (High to Low)</option>
-                  <option value="forks">Sort by Forks (High to Low)</option>
+                  <option value="stars">Most Stars</option>
+                  <option value="forks">Most Forks</option>
                   <option value="updated">Recently Updated</option>
                   <option value="name">Name (A-Z)</option>
                 </select>
               </div>
-
-              <div className="repos-count-badge">
-                Showing {filteredAndSortedRepos.length} of {repos.length} repos
-              </div>
             </div>
 
-            {/* Repos Grid */}
-            {filteredAndSortedRepos.length > 0 ? (
+            {/* Repositories List Grid */}
+            {filteredRepos.length === 0 ? (
+              <div className="empty-repos-state">
+                <i className="fa-solid fa-box-open"></i>
+                <p>No repositories match your selected filters.</p>
+                {(repoQuery || selectedLanguage !== 'all') && (
+                  <button 
+                    className="reset-filters-btn"
+                    onClick={() => {
+                      setRepoQuery('');
+                      setSelectedLanguage('all');
+                    }}
+                  >
+                    Reset Filters
+                  </button>
+                )}
+              </div>
+            ) : (
               <div className="repos-grid">
-                {filteredAndSortedRepos.map(repo => (
-                  <article key={repo.id} className="repo-card">
-                    <div>
-                      <div className="repo-header">
+                {filteredRepos.map(repo => (
+                  <div key={repo.id} className="repo-card">
+                    <div className="repo-card-top">
+                      <div className="repo-card-name-row">
+                        <i className="fa-regular fa-folder-closed repo-icon"></i>
                         <a 
                           href={repo.html_url} 
                           target="_blank" 
                           rel="noreferrer" 
-                          className="repo-name-link"
+                          className="repo-title-link"
                         >
-                          <i className="fa-regular fa-folder-closed"></i>
-                          <span>{repo.name}</span>
+                          {repo.name}
                         </a>
-                        <span className="repo-badge-visibility">
-                          {repo.visibility || (repo.private ? 'Private' : 'Public')}
-                        </span>
                       </div>
-
-                      <p className="repo-description">
-                        {repo.description || 'No description provided.'}
-                      </p>
-
-                      {repo.topics && repo.topics.length > 0 && (
-                        <div className="repo-topics">
-                          {repo.topics.slice(0, 3).map(topic => (
-                            <span key={topic} className="topic-tag">#{topic}</span>
-                          ))}
-                        </div>
-                      )}
+                      <span className="repo-visibility-pill">{repo.visibility || 'public'}</span>
                     </div>
 
-                    <div className="repo-footer">
-                      <div className="repo-lang-meta">
-                        {repo.language ? (
-                          <>
-                            <span 
-                              className="lang-dot" 
-                              style={{ backgroundColor: getLanguageColor(repo.language) }}
-                            ></span>
-                            <span>{repo.language}</span>
-                          </>
-                        ) : (
-                          <span>Plain text</span>
+                    <p className="repo-desc">
+                      {repo.description || 'No description provided for this repository.'}
+                    </p>
+
+                    {/* Topics */}
+                    {repo.topics && repo.topics.length > 0 && (
+                      <div className="repo-topics-list">
+                        {repo.topics.slice(0, 4).map(topic => (
+                          <span key={topic} className="topic-tag">{topic}</span>
+                        ))}
+                        {repo.topics.length > 4 && (
+                          <span className="topic-tag more">+{repo.topics.length - 4}</span>
                         )}
                       </div>
+                    )}
 
-                      <div className="repo-stats-meta">
-                        <span className="repo-stat-item" title="Stars">
+                    {/* Card Footer */}
+                    <div className="repo-card-footer">
+                      <div className="repo-footer-left">
+                        {repo.language && (
+                          <span className="repo-lang">
+                            <span 
+                              className="lang-indicator-dot"
+                              style={{ backgroundColor: getLanguageColor(repo.language) }}
+                            />
+                            {repo.language}
+                          </span>
+                        )}
+
+                        <span className="repo-metric" title="Stars">
                           <i className="fa-regular fa-star"></i>
-                          <span>{formatNumber(repo.stargazers_count)}</span>
+                          {formatNumber(repo.stargazers_count)}
                         </span>
-                        <span className="repo-stat-item" title="Forks">
+
+                        <span className="repo-metric" title="Forks">
                           <i className="fa-solid fa-code-fork"></i>
-                          <span>{formatNumber(repo.forks_count)}</span>
-                        </span>
-                        <span className="repo-stat-item" title="Updated Date">
-                          <i className="fa-regular fa-clock"></i>
-                          <span>{formatDate(repo.updated_at)}</span>
+                          {formatNumber(repo.forks_count)}
                         </span>
                       </div>
+
+                      <span className="repo-updated">
+                        Updated {formatDate(repo.updated_at)}
+                      </span>
                     </div>
-                  </article>
+                  </div>
                 ))}
-              </div>
-            ) : (
-              <div className="empty-state">
-                <i className="fa-solid fa-code-commit"></i>
-                <h3>No repositories match your criteria</h3>
-                <p>Try clearing your search query or selecting "All Languages".</p>
               </div>
             )}
           </section>
@@ -829,22 +799,18 @@ function App() {
       )}
 
       {/* Footer */}
-      <footer className="app-footer">
-        <div>
-          DevScope &bull; Coding Ninjas 10X SRM Web Dev Task &bull; Second Year
-        </div>
-        <div className="footer-tags">
-          <span className="footer-tag">React 18</span>
-          <span className="footer-tag">GitHub REST API</span>
-          <span className="footer-tag">Responsive UI</span>
-          <span className="footer-tag">Zero Config</span>
-        </div>
+      <footer className="footer-nav">
+        <p>
+          DevScope — Built for <strong>Coding Ninjas 10X SRM Club Recruitment</strong>
+        </p>
+        <p className="footer-subtext">
+          Powered by GitHub REST API v3 • React 18
+        </p>
       </footer>
     </div>
   );
 }
 
-// Mount the React Application
-const rootElement = document.getElementById('root');
-const root = ReactDOM.createRoot(rootElement);
+const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<App />);
+
